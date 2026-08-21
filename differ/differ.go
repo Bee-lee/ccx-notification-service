@@ -465,6 +465,35 @@ func (d *Differ) ProduceEntriesToServiceLog(configuration *conf.ConfigStruct, cl
 	return totalMessages, nil
 }
 
+// isRuleDisabled checks whether a rule is disabled either at the cluster level
+// (via cluster_rule_toggle) or at the org level (via rule_disable). It returns
+// true if the rule should be skipped from notification processing.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleName types.RuleName, errorKey types.ErrorKey) bool {
+	ruleID := types.RuleID(ruleName)
+
+	// Check cluster-level disable (cluster_rule_toggle with disabled=1)
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, disabled := d.ClusterDisabledRules[clusterKey]; disabled {
+		return true
+	}
+
+	// Check org-level ack (rule_disable, presence of row means disabled)
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, acked := d.OrgDisabledRules[orgKey]; acked {
+		return true
+	}
+
+	return false
+}
+
 func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent types.RulesMap,
 	reportItems types.ReportContent, report types.ClusterReport) (int, error) {
 
@@ -479,6 +508,17 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// Check if this rule is disabled before any other filtering
+		if d.isRuleDisabled(cluster, ruleName, errorKey) {
+			log.Debug().
+				Str(clusterAttribute, string(cluster.ClusterName)).
+				Str(ruleAttribute, string(ruleName)).
+				Str(errorKeyAttribute, string(errorKey)).
+				Msg("Rule is disabled, skipping notification")
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
