@@ -465,6 +465,40 @@ func (d *Differ) ProduceEntriesToServiceLog(configuration *conf.ConfigStruct, cl
 	return totalMessages, nil
 }
 
+// isRuleDisabled reports whether the given report item has been disabled for
+// the given cluster, either at the cluster level (cluster_rule_toggle) or
+// org-wide (rule_disable). The aggregator tables store rule_id and error_key as
+// separate columns, whereas the report JSON uses the composite
+// rule_id|error_key format in reports[].rule_id and the fully qualified module
+// name in reports[].component. The rule_id needed for matching is derived from
+// the module via moduleToRuleName (e.g. ccx_rules_ocp.external.rules.
+// test_rule.report -> test_rule), which is equivalent to parsing the rule_id
+// portion of the composite value.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, r *types.EvaluatedReportItem) bool {
+	ruleID := types.RuleID(moduleToRuleName(r.Module))
+	errorKey := r.ErrorKey
+
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, ok := d.ClusterDisabledRules[clusterKey]; ok {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, ok := d.OrgDisabledRules[orgKey]; ok {
+		return true
+	}
+
+	return false
+}
+
 func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent types.RulesMap,
 	reportItems types.ReportContent, report types.ClusterReport) (int, error) {
 
@@ -476,6 +510,12 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 	notifiedAt := types.Timestamp(time.Now())
 
 	for _, r := range reportItems {
+		// A disabled rule (per-cluster or org-wide) must never reach the total
+		// risk filter or ShouldNotify, so this check is evaluated first.
+		if d.isRuleDisabled(cluster, r) {
+			continue
+		}
+
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey

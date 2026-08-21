@@ -59,6 +59,8 @@ var (
 	CloseStorage                   = closeStorage
 	PrintNewReportsForCleanup      = printNewReportsForCleanup
 
+	IsRuleDisabled                     = (*Differ).isRuleDisabled
+	ProduceEntriesToKafka              = (*Differ).produceEntriesToKafka
 	LoadDisabledRules                  = (*Differ).loadDisabledRules
 	FetchDisabledRulesFromAggregatorDB = (*Differ).fetchDisabledRulesFromAggregatorDB
 )
