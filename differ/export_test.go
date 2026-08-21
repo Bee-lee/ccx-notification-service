@@ -42,6 +42,8 @@ var (
 	AppendEventToNotificationMessage   = appendEventToNotificationMessage
 	CalculateTotalRisk                 = calculateTotalRisk
 	ModuleToRuleName                   = moduleToRuleName
+	ModuleToRuleID                     = moduleToRuleID
+	IsRuleDisabled                     = (*Differ).isRuleDisabled
 	AssertNotificationDestination      = assertNotificationDestination
 
 	GetState               = getState

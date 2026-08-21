@@ -236,6 +236,56 @@ func ruleIDToRuleName(ruleID types.RuleID) types.RuleName {
 	return types.RuleName(ruleID[strings.LastIndex(string(ruleID), ".")+1:])
 }
 
+// moduleToRuleID converts a module name to a rule ID by stripping the
+// ".report" suffix. The result matches the rule_id column format used in the
+// aggregator DB's cluster_rule_toggle and rule_disable tables.
+//
+// ccx_rules_ocp.external.rules.cluster_wide_proxy_auth_check.report
+// ->
+// ccx_rules_ocp.external.rules.cluster_wide_proxy_auth_check
+func moduleToRuleID(module types.ModuleName) types.RuleID {
+	return types.RuleID(strings.TrimSuffix(string(module), ".report"))
+}
+
+// isRuleDisabled checks whether a rule is disabled at the cluster level
+// (cluster_rule_toggle) or at the org level (rule_disable). It converts the
+// module name to a rule ID for map lookups.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, module types.ModuleName, errorKey types.ErrorKey) bool {
+	ruleID := moduleToRuleID(module)
+
+	// check cluster-level disabled rules (cluster_rule_toggle)
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, ok := d.ClusterDisabledRules[clusterKey]; ok {
+		log.Debug().
+			Str(clusterAttribute, string(cluster.ClusterName)).
+			Str(ruleAttribute, string(ruleID)).
+			Str(errorKeyAttribute, string(errorKey)).
+			Msg("Rule is disabled at cluster level, skipping")
+		return true
+	}
+
+	// check org-level disabled rules (rule_disable)
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, ok := d.OrgDisabledRules[orgKey]; ok {
+		log.Debug().
+			Str(clusterAttribute, string(cluster.ClusterName)).
+			Str(ruleAttribute, string(ruleID)).
+			Str(errorKeyAttribute, string(errorKey)).
+			Msg("Rule is disabled at org level, skipping")
+		return true
+	}
+
+	return false
+}
+
 func findRuleByNameAndErrorKey(
 	ruleContent types.RulesMap, ruleName types.RuleName, errorKey types.ErrorKey) (
 	likelihood int, impact int, totalRisk int, description string, tags types.TagsSet) {
@@ -477,8 +527,14 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 
 	for _, r := range reportItems {
 		module := r.Module
-		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// skip rules that are disabled at cluster or org level
+		if d.isRuleDisabled(cluster, module, errorKey) {
+			continue
+		}
+
+		ruleName := moduleToRuleName(module)
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
