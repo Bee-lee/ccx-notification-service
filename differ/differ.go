@@ -465,6 +465,37 @@ func (d *Differ) ProduceEntriesToServiceLog(configuration *conf.ConfigStruct, cl
 	return totalMessages, nil
 }
 
+// isRuleDisabled reports whether the given rule is disabled for the given
+// cluster, either at the cluster level (cluster_rule_toggle) or org-wide
+// (rule_disable). The report JSON stores the rule in the composite
+// rule_id|error_key format inside reports[].rule_id and the module name in
+// reports[].component; the aggregator DB keeps rule_id and error_key as
+// separate columns. The rule_id used for matching is derived from the module
+// name via moduleToRuleName, matching how the aggregator DB stores it.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleName types.RuleName, errorKey types.ErrorKey) bool {
+	ruleID := types.RuleID(ruleName)
+
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, ok := d.ClusterDisabledRules[clusterKey]; ok {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, ok := d.OrgDisabledRules[orgKey]; ok {
+		return true
+	}
+
+	return false
+}
+
 func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent types.RulesMap,
 	reportItems types.ReportContent, report types.ClusterReport) (int, error) {
 
@@ -479,6 +510,14 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// skip rules that have been disabled per-cluster (cluster_rule_toggle)
+		// or org-wide (rule_disable) before any further processing, so a
+		// disabled rule never reaches the total risk filter or ShouldNotify
+		if d.isRuleDisabled(cluster, ruleName, errorKey) {
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
