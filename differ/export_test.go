@@ -61,6 +61,7 @@ var (
 
 	LoadDisabledRules                  = (*Differ).loadDisabledRules
 	FetchDisabledRulesFromAggregatorDB = (*Differ).fetchDisabledRulesFromAggregatorDB
+	IsRuleDisabled                     = (*Differ).isRuleDisabled
 )
 
 const (

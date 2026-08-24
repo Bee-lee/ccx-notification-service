@@ -310,6 +310,35 @@ func createServiceLogEntry(report *types.RenderedReport, cluster types.ClusterEn
 	return logEntry
 }
 
+// isRuleDisabled checks whether a rule is disabled either at the cluster level
+// (cluster_rule_toggle) or at the org level (rule_disable). It performs O(1)
+// lookups into the in-memory maps populated at startup.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleName types.RuleName, errorKey types.ErrorKey) bool {
+	ruleID := types.RuleID(ruleName)
+
+	// check cluster-level disable (cluster_rule_toggle)
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, found := d.ClusterDisabledRules[clusterKey]; found {
+		return true
+	}
+
+	// check org-level disable (rule_disable)
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, found := d.OrgDisabledRules[orgKey]; found {
+		return true
+	}
+
+	return false
+}
+
 // evaluateTagFilter checks if processed rule contains all required tags, for
 // example tag "osd_customer".
 func evaluateTagFilter(filterEnabled bool, tagsSet, reportItemTags types.TagsSet) bool {
@@ -479,6 +508,17 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// check if the rule is disabled before any other filtering
+		if d.isRuleDisabled(cluster, ruleName, errorKey) {
+			log.Debug().
+				Str(ruleAttribute, string(ruleName)).
+				Str(errorKeyAttribute, string(errorKey)).
+				Str(clusterAttribute, string(cluster.ClusterName)).
+				Msg("Rule is disabled, skipping")
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
