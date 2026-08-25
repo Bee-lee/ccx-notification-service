@@ -175,7 +175,12 @@ type ErrorKey string
 
 // ReportItem represents a single (hit) rule of the string encoded report
 type ReportItem struct {
-	Type     string          `json:"type"`
+	Type string `json:"type"`
+	// RuleID holds the composite "rule_id|error_key" identifier as stored in
+	// the report JSON. It is needed to match report rules against the
+	// per-cluster and org-wide disabled-rule maps, whose keys use the rule_id
+	// and error_key as separate values.
+	RuleID   RuleID          `json:"rule_id"`
 	Module   ModuleName      `json:"component"`
 	ErrorKey ErrorKey        `json:"key"`
 	Details  json.RawMessage `json:"details"`

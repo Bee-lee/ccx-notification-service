@@ -236,6 +236,44 @@ func ruleIDToRuleName(ruleID types.RuleID) types.RuleName {
 	return types.RuleName(ruleID[strings.LastIndex(string(ruleID), ".")+1:])
 }
 
+// parseCompositeRuleID splits the composite "rule_id|error_key" identifier used
+// in the report JSON into its separate rule_id and error_key parts. The
+// aggregator DB stores these as separate columns in cluster_rule_toggle and
+// rule_disable, so matching a report rule against the disabled-rule maps
+// requires this split. If the composite does not contain the "|" separator, the
+// whole value is treated as the rule_id and the error_key is returned empty.
+func parseCompositeRuleID(composite types.RuleID) (types.RuleID, types.ErrorKey) {
+	ruleID, errorKey, _ := strings.Cut(string(composite), "|")
+	return types.RuleID(ruleID), types.ErrorKey(errorKey)
+}
+
+// isRuleDisabled reports whether the rule identified by ruleID and errorKey is
+// disabled for the given cluster, either at the cluster level (via the
+// cluster_rule_toggle map keyed by cluster_id, rule_id, error_key) or org-wide
+// (via the rule_disable map keyed by org_id, rule_id, error_key). If the rule is
+// found in either map it is considered disabled.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleID types.RuleID, errorKey types.ErrorKey) bool {
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, ok := d.ClusterDisabledRules[clusterKey]; ok {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	if _, ok := d.OrgDisabledRules[orgKey]; ok {
+		return true
+	}
+
+	return false
+}
+
 func findRuleByNameAndErrorKey(
 	ruleContent types.RulesMap, ruleName types.RuleName, errorKey types.ErrorKey) (
 	likelihood int, impact int, totalRisk int, description string, tags types.TagsSet) {
@@ -476,6 +514,21 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 	notifiedAt := types.Timestamp(time.Now())
 
 	for _, r := range reportItems {
+		// A disabled rule must never reach the total risk filter or
+		// ShouldNotify, so this check is the first thing evaluated for each
+		// rule. The report JSON stores the identifier in the composite
+		// "rule_id|error_key" format, which is split to match the disabled-rule
+		// maps whose keys use rule_id and error_key as separate values.
+		disabledRuleID, disabledErrorKey := parseCompositeRuleID(r.RuleID)
+		if d.isRuleDisabled(cluster, disabledRuleID, disabledErrorKey) {
+			log.Debug().
+				Str(clusterAttribute, string(cluster.ClusterName)).
+				Str(ruleAttribute, string(disabledRuleID)).
+				Str(errorKeyAttribute, string(disabledErrorKey)).
+				Msg("Skipping disabled rule")
+			continue
+		}
+
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey

@@ -61,6 +61,10 @@ var (
 
 	LoadDisabledRules                  = (*Differ).loadDisabledRules
 	FetchDisabledRulesFromAggregatorDB = (*Differ).fetchDisabledRulesFromAggregatorDB
+
+	ParseCompositeRuleID  = parseCompositeRuleID
+	IsRuleDisabled        = (*Differ).isRuleDisabled
+	ProduceEntriesToKafka = (*Differ).produceEntriesToKafka
 )
 
 const (
