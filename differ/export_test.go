@@ -61,6 +61,7 @@ var (
 
 	LoadDisabledRules                  = (*Differ).loadDisabledRules
 	FetchDisabledRulesFromAggregatorDB = (*Differ).fetchDisabledRulesFromAggregatorDB
+	IsRuleDisabled                     = (*Differ).isRuleDisabled
 )
 
 const (
@@ -77,6 +78,7 @@ const (
 	AggregatorDBConnectionMessage = aggregatorDBConnectionMessage
 	AggregatorDBClosedMessage     = aggregatorDBClosedMessage
 	AggregatorDBSkippedMessage    = aggregatorDBSkippedMessage
+	RuleDisabledMessage           = ruleDisabledMessage
 )
 
 func InClauseFromStringSlice(slice []string) string {

@@ -125,6 +125,7 @@ const (
 	aggregatorDBConnectionMessage = "Connecting to aggregator database to fetch disabled rules"
 	aggregatorDBClosedMessage     = "Aggregator database connection closed"
 	aggregatorDBSkippedMessage    = "Skipping aggregator DB connection (--ignore-disabled-rules is set)"
+	ruleDisabledMessage           = "Rule is disabled, skipping notification"
 )
 
 // Constants for notification message top level fields
@@ -479,6 +480,16 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// check if rule is disabled at cluster or org level
+		if d.isRuleDisabled(cluster, ruleName, errorKey) {
+			log.Debug().
+				Str(ruleAttribute, string(ruleName)).
+				Str(errorKeyAttribute, string(errorKey)).
+				Msg(ruleDisabledMessage)
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
@@ -868,6 +879,32 @@ func (d *Differ) RetrievePreviouslyReportedForEventTarget(cooldown string, targe
 	}
 	log.Info().Int("target", int(target)).Int("retrieved", len(d.PreviouslyReported)).Msg("Done reading previously reported issues still in cool down")
 	return nil
+}
+
+// isRuleDisabled checks whether a rule is disabled either at the cluster
+// level (via cluster_rule_toggle) or at the org level (via rule_disable).
+// It performs O(1) lookups against the in-memory maps populated at startup.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleName types.RuleName, errorKey types.ErrorKey) bool {
+	ruleID := types.RuleID(ruleName)
+
+	// check cluster-level disabled rules (cluster_rule_toggle)
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, ok := d.ClusterDisabledRules[clusterKey]; ok {
+		return true
+	}
+
+	// check org-level disabled rules (rule_disable)
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	_, ok := d.OrgDisabledRules[orgKey]
+	return ok
 }
 
 // loadDisabledRules fetches disabled-rule data from d.AggregatorStorage
