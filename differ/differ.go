@@ -465,6 +465,37 @@ func (d *Differ) ProduceEntriesToServiceLog(configuration *conf.ConfigStruct, cl
 	return totalMessages, nil
 }
 
+// isRuleDisabled checks whether a given rule (identified by its rule name and
+// error key) has been disabled for the given cluster, either via a
+// per-cluster disable (cluster_rule_toggle) or an org-wide ack (rule_disable).
+//
+// The report JSON identifies a rule using the composite `rule_id|error_key`
+// format (see reports[].rule_id), where rule_id matches the short rule name
+// derived from reports[].component (e.g. moduleToRuleName's output). Since
+// ruleName here is already derived the same way, it is equivalent to the
+// rule_id half of that composite value and can be compared directly against
+// the aggregator DB's rule_id column without needing to parse a raw string.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleName types.RuleName, errorKey types.ErrorKey) bool {
+	ruleID := types.RuleID(ruleName)
+
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, disabled := d.ClusterDisabledRules[clusterKey]; disabled {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	_, disabled := d.OrgDisabledRules[orgKey]
+	return disabled
+}
+
 func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent types.RulesMap,
 	reportItems types.ReportContent, report types.ClusterReport) (int, error) {
 
@@ -479,6 +510,16 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		if d.isRuleDisabled(cluster, ruleName, errorKey) {
+			log.Debug().
+				Str(clusterAttribute, string(cluster.ClusterName)).
+				Str(ruleAttribute, string(ruleName)).
+				Str(errorKeyAttribute, string(errorKey)).
+				Msg("Rule is disabled, skipping")
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
