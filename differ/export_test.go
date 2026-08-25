@@ -42,7 +42,11 @@ var (
 	AppendEventToNotificationMessage   = appendEventToNotificationMessage
 	CalculateTotalRisk                 = calculateTotalRisk
 	ModuleToRuleName                   = moduleToRuleName
+	ModuleToRuleID                     = moduleToRuleID
 	AssertNotificationDestination      = assertNotificationDestination
+
+	IsRuleDisabled        = (*Differ).isRuleDisabled
+	ProduceEntriesToKafka = (*Differ).produceEntriesToKafka
 
 	GetState               = getState
 	GetStates              = getStates

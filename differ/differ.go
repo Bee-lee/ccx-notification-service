@@ -229,6 +229,44 @@ func moduleToRuleName(module types.ModuleName) types.RuleName {
 	return ruleIDToRuleName(types.RuleID(result))
 }
 
+// moduleToRuleID converts the module name found in the report JSON
+// (reports[].component) into the rule_id part of the composite
+// `rule_id|error_key` format used elsewhere in the report JSON
+// (reports[].rule_id). This is also the format used by the `rule_id` column
+// of the aggregator DB's cluster_rule_toggle and rule_disable tables.
+//
+// ccx_rules_ocp.external.rules.cluster_wide_proxy_auth_check.report
+// ->
+// ccx_rules_ocp.external.rules.cluster_wide_proxy_auth_check
+func moduleToRuleID(module types.ModuleName) types.RuleID {
+	return types.RuleID(strings.TrimSuffix(string(module), ".report"))
+}
+
+// isRuleDisabled checks whether the given rule has been disabled either for
+// the specific cluster (via the cluster_rule_toggle table) or org-wide (via
+// the rule_disable table). Both hash maps are populated at startup by
+// loadDisabledRules, or left empty when --ignore-disabled-rules is set.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, module types.ModuleName, errorKey types.ErrorKey) bool {
+	ruleID := moduleToRuleID(module)
+
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, disabled := d.ClusterDisabledRules[clusterKey]; disabled {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	_, disabled := d.OrgDisabledRules[orgKey]
+	return disabled
+}
+
 // ccx_rules_ocp.external.rules.cluster_wide_proxy_auth_check
 // ->
 // cluster_wide_proxy_auth_check
@@ -479,6 +517,11 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		if d.isRuleDisabled(cluster, module, errorKey) {
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
