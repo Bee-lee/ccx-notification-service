@@ -125,6 +125,7 @@ const (
 	aggregatorDBConnectionMessage = "Connecting to aggregator database to fetch disabled rules"
 	aggregatorDBClosedMessage     = "Aggregator database connection closed"
 	aggregatorDBSkippedMessage    = "Skipping aggregator DB connection (--ignore-disabled-rules is set)"
+	ruleDisabledMessage           = "Rule is disabled for this cluster or organization, skipping"
 )
 
 // Constants for notification message top level fields
@@ -234,6 +235,33 @@ func moduleToRuleName(module types.ModuleName) types.RuleName {
 // cluster_wide_proxy_auth_check
 func ruleIDToRuleName(ruleID types.RuleID) types.RuleName {
 	return types.RuleName(ruleID[strings.LastIndex(string(ruleID), ".")+1:])
+}
+
+// isRuleDisabled reports whether the given rule has been disabled, either
+// specifically for this cluster via the aggregator DB's cluster_rule_toggle
+// table, or acked for the whole organization via the rule_disable table.
+// Either match is sufficient for the rule to be considered disabled.
+//
+// ruleID and errorKey together correspond to the composite rule_id|error_key
+// identity used in the report JSON (see moduleToRuleName), matched against
+// the separate rule_id/error_key columns stored in the aggregator DB tables.
+func (d *Differ) isRuleDisabled(cluster types.ClusterEntry, ruleID types.RuleID, errorKey types.ErrorKey) bool {
+	clusterKey := types.ClusterRuleKey{
+		ClusterID: cluster.ClusterName,
+		RuleID:    ruleID,
+		ErrorKey:  errorKey,
+	}
+	if _, disabled := d.ClusterDisabledRules[clusterKey]; disabled {
+		return true
+	}
+
+	orgKey := types.OrgRuleKey{
+		OrgID:    fmt.Sprint(cluster.OrgID),
+		RuleID:   ruleID,
+		ErrorKey: errorKey,
+	}
+	_, disabled := d.OrgDisabledRules[orgKey]
+	return disabled
 }
 
 func findRuleByNameAndErrorKey(
@@ -479,6 +507,18 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		module := r.Module
 		ruleName := moduleToRuleName(module)
 		errorKey := r.ErrorKey
+
+		// a disabled rule (per-cluster toggle or org-wide ack) is skipped
+		// entirely and never reaches the total risk filter or ShouldNotify
+		if d.isRuleDisabled(cluster, types.RuleID(ruleName), errorKey) {
+			log.Debug().
+				Str(clusterAttribute, string(cluster.ClusterName)).
+				Str(ruleAttribute, string(ruleName)).
+				Str(errorKeyAttribute, string(errorKey)).
+				Msg(ruleDisabledMessage)
+			continue
+		}
+
 		likelihood, impact, totalRisk, description, tags := findRuleByNameAndErrorKey(ruleContent, ruleName, errorKey)
 		eventValue := EventValue{
 			Likelihood: likelihood,
