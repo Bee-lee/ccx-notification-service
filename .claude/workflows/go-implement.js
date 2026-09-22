@@ -109,6 +109,23 @@ function collectFeedback(phases) {
     : ''
 }
 
+// Renders the verify agent's structured deviations into the displaySummary.
+// The verdict paragraph in verify.report usually only counts them, so without
+// this the per-finding `detail` text never reaches the user.
+// Ordered most-severe first; `detail` is optional in the schema.
+const SEVERITY_ORDER = ['critical', 'major', 'minor', 'note']
+
+function collectDeviations(deviations) {
+  const items = (deviations || []).slice().sort(
+    (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)
+  )
+  return items.length
+    ? '\n\n### Verification deviations\n\n' + items.map(d =>
+        '**[' + d.severity + ']** ' + d.issue + (d.detail ? '\n\n> ' + d.detail.replace(/\n/g, '\n> ') : '')
+      ).join('\n\n')
+    : ''
+}
+
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -220,7 +237,7 @@ const UNIT_TEST_SCHEMA = {
 }
 
 // Phase 3 result: independent review verdict, findings by severity, and make before_commit output.
-// make before_commit runs: style (shellcheck + abcgo + golangci-lint), unit tests, license headers, and coverage check.
+// make before_commit runs: style (shellcheck + abcgo + golangci-lint), unit tests, and coverage check.
 // Example: { verdict: "pass_with_notes", deviations: [{issue: "missing nil check", severity: "minor"}], beforeCommitPassed: true, report: "..." }
 const VERIFICATION_SCHEMA = {
   type: 'object',
@@ -242,7 +259,7 @@ const VERIFICATION_SCHEMA = {
         },
       },
     },
-    beforeCommitPassed: { type: 'boolean', description: 'Whether make before_commit passed (style + tests + license + coverage)' },
+    beforeCommitPassed: { type: 'boolean', description: 'Whether make before_commit passed (style + tests + coverage)' },
     beforeCommitOutput: {
       type: 'string',
       description: 'Output of make before_commit (abbreviated if long)',
@@ -454,9 +471,12 @@ ${specContext}
 
 1. Read the files you are going to modify in full before writing anything. Also read any files referenced in the issue specification. You may explore other files if you have a specific reason (understanding a type, checking an interface, reading a dependency), but stay focused on the task.
 2. Implement the production code changes described in the scope and the acceptance criteria. If a design document is provided above, use it as the primary guide for architecture and approach. Follow the existing code style and patterns in the repo. Before introducing a new pattern (e.g., for dependency injection or testability), check how similar problems are solved in the same package and follow those conventions.
-3. If you added new imports or dependencies, run \`go mod tidy\`.
-4. If you added or modified any interface, run \`make gen-mocks\` (see AGENTS.md for details).
-5. Run \`make style\` to check linting. Fix any issues it reports and re-run \`make style\` until it passes. If you cannot resolve an issue after 3 attempts, stop and describe the issue and the \`make style\` error output in warnings.
+3. If you inserted code into a region that carries annotations (\`//TODO\`, \`//NOTE\`, \`//FIXME\`, section header comments), re-read those annotations and confirm each is still accurate and still positioned where it belongs. Inserting above a marker that describes the code below it silently invalidates the marker; move or update it. Linters cannot catch this.
+4. If the specification offers alternative ways to handle something ("either extract a shared helper, or add it inline and note the duplication"), and you rule out the first branch, you must still carry out the fallback branch. Do not treat the whole clause as satisfied because one branch turned out to be moot.
+5. If a function you need to write or call is unexported and the acceptance criteria require it to be unit-tested, add an alias to the package's \`export_test.go\` now, following the AGENTS.md convention. Whoever writes the tests afterwards will not be able to modify production files, so an alias that is missing at the end of your turn cannot be added later. Add aliases only for functions the acceptance criteria actually require to be tested, and do not restructure production code to make it more testable.
+6. If you added new imports or dependencies, run \`go mod tidy\`.
+7. If you added or modified any interface, run \`make gen-mocks\` (see AGENTS.md for details).
+8. Run \`make style\` to check linting. Fix any issues it reports and re-run \`make style\` until it passes. If you cannot resolve an issue after 3 attempts, stop and describe the issue and the \`make style\` error output in warnings.
 
 ## Constraints
 
@@ -464,15 +484,16 @@ ${specContext}
 - Do not run \`make before_commit\`, \`make test\`, or \`make coverage\`.
 - Do not create any git commits. Leave all changes in the working tree.
 - If the specification is ambiguous on any point, note it in warnings rather than guessing.
-- If a dependency from another issue is not yet merged or available, stop and include an explanation in warnings. Report whatever files you did manage to create in filesModified.
-- If a function would start with a boolean guard that skips the entire body, place the check at the call site instead. The function should do one thing; the caller decides whether to call it.
+- If a dependency from another issue is not yet merged or available, stop and include an explanation in warnings. Report whatever files you did manage to create in filesModified. Before concluding a dependency is missing, check whether it already landed: run \`git log --oneline --grep '<KEY>'\` for each issue key the specification names as a prerequisite, and search for the symbols that issue was supposed to introduce.
+- If a function would start with a boolean guard that makes the entire call a no-op — a config flag or feature toggle, not a normal input condition — place the check at the call site instead. The function should do one thing; the caller decides whether to call it. This does not apply to predicates, validators, or helpers whose job is to answer a question or return early on ordinary input.
 
 ## Before finishing, verify
 
 1. If you changed an interface, mocks are regenerated (you ran \`make gen-mocks\`).
 2. \`make style\` passes with no errors.
-3. Every acceptance criteria from the specification has a corresponding code change.
-4. No git commits were created. All changes are in the working tree only.
+3. Every acceptance criteria from the specification has a corresponding code change. Acceptance criteria that only call for a unit test are written separately afterwards and are out of scope for you — exclude them from this check instead of reporting them as unmet.
+4. Any comment annotation adjacent to code you inserted is still accurate and correctly positioned.
+5. No git commits were created. All changes are in the working tree only.
 
 ${FEEDBACK_PROMPT}`,
   { label: 'implement', schema: IMPLEMENT_SCHEMA }
@@ -562,9 +583,12 @@ ${specContext}
 6. Run \`go test\` for the affected packages. Capture the output.
 7. If a test fails, you may fix the test code. After 3 edit-and-rerun cycles on the same failing test, stop and add a description of what failed and why to the failures list. Keep the failing test in the file (do not delete it).
 8. If some tests pass and others could not be fixed, keep all tests, both passing and failing.
-9. Run \`make test\` to run the full test suite.
-10. Run \`make coverage\` to display per-function coverage. The project's \`check_coverage.sh\` (called by \`make before_commit\`) enforces a fixed threshold — if coverage was already below that threshold before your changes, treat it as baseline debt, not a new issue. Only flag coverage regressions or newly uncovered lines introduced by the patch. Some functions are structurally uncoverable in unit tests — for example, orchestrator functions that create their own database connections internally. This is acceptable when the underlying methods they call are independently covered. Do not refactor production code for testability; report the coverage gap in feedback instead.
-11. Ensure allowed test and mock files have license headers. Do not modify production files; report any missing production-file headers for Phase 1 to address.
+9. Falsify every test you wrote. A test that passes proves nothing on its own — you must establish that it would fail if the behaviour it claims to check were absent. For each new test, in order of preference:
+   a. If the test depends on a fixture value (a field in a JSON blob, a map key, a struct field), corrupt that value so it no longer matches, re-run **that test alone** with \`go test -run '^TestName$' ./path/to/package\`, and confirm it FAILS. Then restore the fixture and re-run to confirm it passes again. Run the single test, not the whole package: a test that only passes because a sibling test left the right global state behind (a replaced logger, an initialized package-level variable) will look green in a package run and fail in isolation. If the isolated run fails for that reason rather than because of your mutation, fix the test to set up the state it needs. Only ever mutate values inside test files — never touch production code, not even temporarily.
+   b. If no fixture mutation applies, name the single production line whose deletion would make the test fail, and state it in a comment or in your summary. If you cannot name one, or if the same test would still pass with that line deleted, the test is not testing what its name claims. Strengthen it or rename it to describe what it actually asserts.
+   Pay particular attention to tests whose name references a specific mechanism (a format, a lookup key, an ordering): confirm the test actually exercises that mechanism and not an incidental path that happens to produce the same result. Also confirm each test distinguishes the outcome it asserts from a neighbouring outcome that would look identical — a test asserting "filtered out because the value was below the threshold" must fail if the value were instead missing entirely.
+10. Run \`make test\` to run the full test suite.
+11. Run \`make coverage\` to display per-function coverage. The project's \`check_coverage.sh\` (called by \`make before_commit\`) enforces a fixed threshold — if coverage was already below that threshold before your changes, treat it as baseline debt, not a new issue. Only flag coverage regressions or newly uncovered lines introduced by the patch. Some functions are structurally uncoverable in unit tests — for example, orchestrator functions that create their own database connections internally. This is acceptable when the underlying methods they call are independently covered. Do not refactor production code for testability; report the coverage gap in feedback instead.
 
 ## Constraints
 
@@ -584,8 +608,10 @@ ${specContext}
 3. \`go test\` passes for all affected packages (or every failure is documented in the failures list with a description).
 4. \`make coverage\` passes, or explains why it didn't pass (uncoverable statements, non-existing mocks).
 5. Test assertions check spec-defined expected values, not values copied from the implementation output.
-6. No production code was modified.
-7. No git commits were created.
+6. Every test was falsified per instruction 9: you either watched it fail against a corrupted fixture and pass again after restoring, or you can name the production line whose removal breaks it. Any test you could not falsify is reported in \`feedback\` with the reason.
+7. All fixtures mutated during falsification were restored - \`git diff\` and \`git status\` show only the tests you intended to leave behind, and \`go test\` passes.
+8. No production code was modified.
+9. No git commits were created.
 
 ${FEEDBACK_PROMPT}`,
   { label: 'unit-tests', schema: UNIT_TEST_SCHEMA }
@@ -692,7 +718,7 @@ ${specContext}
 
 The diff should contain ${tests.testsWritten} new or modified test function(s) that ${tests.testsPassed ? 'passed' : 'failed'} when last run. Verify this independently by counting test functions in the diff (\`git diff ${baseSha}\`) and in untracked test files (\`git ls-files --others --exclude-standard '*.go'\`).
 
-All changes exist only as **uncommitted working tree modifications** — there is no commit, no stash, no backup. Any git command that modifies tracked files (\`git stash\`, \`git checkout\`, \`git reset\`, \`git restore\`, \`git clean\`) will **permanently destroy** the implementation code with no way to recover it.
+${preflight.cleanTree ? '' : 'For context, these paths already had uncommitted modifications before any code was written this run:\n\n```\n' + (preflight.dirtyFiles || '(unknown)').trim() + '\n```\n\nChanges under these paths most likely predate the work you are reviewing, so weight your effort towards the implementation and its tests instead. Two caveats. A file listed here may also carry in-scope edits made during the run, and with no commit between the two you cannot always separate them — where that happens, review the content on its merits rather than dismissing the file. And if something in this list materially affects your review (a build or lint target that was weakened, a dependency version change, a config flag that alters what the checks actually enforce), say so as a `note`: it should not count against the verdict on the implementation, but it is worth surfacing.\n\n'}All changes exist only as **uncommitted working tree modifications** — there is no commit, no stash, no backup. Any git command that modifies tracked files (\`git stash\`, \`git checkout\`, \`git reset\`, \`git restore\`, \`git clean\`) will **permanently destroy** the implementation code with no way to recover it.
 
 ${tests.failures && tests.failures.length ? 'The following test failures were already identified before your review. If \`make before_commit\` fails on any of these, treat them as known issues rather than new findings:\n' + tests.failures.map(f => '- ' + f).join('\n') : ''}
 
@@ -710,7 +736,7 @@ ${tests.failures && tests.failures.length ? 'The following test failures were al
 3. Look for missing edge cases, especially scenarios from the specification, design document, or BDD feature files that the code does not handle.
 4. Look for bugs: logic errors, off-by-one mistakes, nil pointer risks, race conditions, resource leaks, or security issues.
 5. Check test quality: do the test assertions check spec-defined expected values, or do they just mirror what the implementation returns? Flag assertions that would pass even if the code were broken (e.g., asserting the return value matches whatever the function happens to return, rather than what the spec says it should return). If the spec does not define exact expected values, note this limitation.
-6. Run \`make before_commit\` to check style, tests, license headers, and coverage. Report the output and whether it passed or failed (for beforeCommitPassed).
+6. Run \`make before_commit\` to check style, tests, and coverage. Report the output and whether it passed or failed (for beforeCommitPassed).
 7. If \`make before_commit\` fails, determine whether the failure is pre-existing or caused by this change by using **read-only** methods only: check whether the failing file appears in \`git diff ${baseSha}\`, inspect the error message, or use \`git show ${baseSha}:<file>\` to view the original file content. Never checkout, stash, or revert files to test the baseline. Note the distinction between new and pre-existing failures in your report.
 
 ## Constraints
@@ -828,6 +854,10 @@ log('  Total:     ' + formatCost(totalCost))
 const testResult = tests.testsPassed ? 'passed' : 'FAILED'
 const beforeCommitResult = verify.beforeCommitPassed ? 'passed' : 'FAILED'
 const feedbackSection = collectFeedback({ implement: impl, tests, verify })
+const deviationsSection = collectDeviations(verify.deviations)
+const warningsSection = (impl.warnings && impl.warnings.length)
+  ? '\n\n### Implementation warnings\n\n' + impl.warnings.map(w => '- ' + w).join('\n')
+  : ''
 
 // This is the final return statement that the main Claude session receives back
 // if the workflow finishes successfully.
@@ -847,7 +877,7 @@ return {
 
 ### Verification report
 
-${verify.report}${feedbackSection}
+${verify.report}${deviationsSection}${warningsSection}${feedbackSection}
 
 ### Estimated costs
 
