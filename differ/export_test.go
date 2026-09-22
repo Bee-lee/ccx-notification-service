@@ -62,8 +62,10 @@ var (
 	LoadDisabledRules                  = (*Differ).loadDisabledRules
 	FetchDisabledRulesFromAggregatorDB = (*Differ).fetchDisabledRulesFromAggregatorDB
 	IsRuleDisabled                     = (*Differ).isRuleDisabled
+	FilterDisabledRulesFromReport      = (*Differ).filterDisabledRulesFromReport
 	ProduceEntriesToKafka              = (*Differ).produceEntriesToKafka
 	GetReportsWithIssuesToNotify       = (*Differ).getReportsWithIssuesToNotify
+	ProcessReportsByCluster            = (*Differ).processReportsByCluster
 )
 
 const (
@@ -81,6 +83,9 @@ const (
 	AggregatorDBClosedMessage     = aggregatorDBClosedMessage
 	AggregatorDBSkippedMessage    = aggregatorDBSkippedMessage
 	DisabledRuleSkippedMessage    = disabledRuleSkippedMessage
+	DisabledRulesOmittedMessage   = disabledRulesOmittedMessage
+	ReportFilteringFailedMessage  = reportFilteringFailedMessage
+	ReportsJSONField              = reportsJSONField
 )
 
 func InClauseFromStringSlice(slice []string) string {

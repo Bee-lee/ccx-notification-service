@@ -126,6 +126,8 @@ const (
 	aggregatorDBClosedMessage     = "Aggregator database connection closed"
 	aggregatorDBSkippedMessage    = "Skipping aggregator DB connection (--ignore-disabled-rules is set)"
 	disabledRuleSkippedMessage    = "Skipping rule disabled by the customer"
+	disabledRulesOmittedMessage   = "Omitting rules disabled by the customer from the stored report"
+	reportFilteringFailedMessage  = "Cannot omit disabled rules from the report, storing it unchanged"
 )
 
 // Constants for notification message top level fields
@@ -373,6 +375,102 @@ func logDisabledRuleSkip(cluster types.ClusterEntry, ruleName types.RuleName, er
 		Msg(disabledRuleSkippedMessage)
 }
 
+// reportsJSONField is the key under which a report JSON document (as stored in
+// the `report` column of both the `new_reports` and the `reported` table) holds
+// the list of rule hits.
+const reportsJSONField = "reports"
+
+// filterDisabledRulesFromReport returns the given report with every rule the
+// customer has disabled removed from its list of rule hits. The result is what
+// gets stored in the `report` column of the `reported` table, which is the
+// baseline IssueNotInReport compares against on the following runs. Omitting the
+// disabled rules is what makes re-enable detection work without touching the
+// cooldown logic: a re-enabled rule is no longer part of the stored baseline, so
+// it is seen as a new issue and the customer is notified (still subject to the
+// cooldown, which only ever looks at state=1 records).
+//
+// The rule hits are filtered as raw JSON instead of by re-marshalling a
+// types.Report so that everything this service does not model survives the round
+// trip untouched: the composite "rule_id" of each hit, its "tags" and "links",
+// the top level "analysis_metadata", and so on. Each hit is identified exactly
+// the same way as in the per-rule filtering loops, from moduleToRuleName of its
+// "component" and from its "key", which is the very same (rule_id, error_key)
+// pair that the composite "rule_id" field encodes.
+//
+// The report is returned unchanged when there is nothing to omit: when no rule
+// at all is disabled (which is also the case when --ignore-disabled-rules is set
+// and both maps are therefore left empty), when no rule of this particular
+// report is disabled, or when the report cannot be processed as JSON.
+func (d *Differ) filterDisabledRulesFromReport(cluster types.ClusterEntry, report types.ClusterReport) types.ClusterReport {
+	if len(d.ClusterDisabledRules) == 0 && len(d.OrgDisabledRules) == 0 {
+		return report
+	}
+
+	logReportFilteringError := func(err error) {
+		log.Err(err).
+			Str(clusterAttribute, string(cluster.ClusterName)).
+			Msg(reportFilteringFailedMessage)
+	}
+
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		logReportFilteringError(err)
+		return report
+	}
+
+	rawReportItems, found := document[reportsJSONField]
+	if !found {
+		return report
+	}
+
+	var reportItems []json.RawMessage
+	if err := json.Unmarshal(rawReportItems, &reportItems); err != nil {
+		logReportFilteringError(err)
+		return report
+	}
+
+	enabledReportItems := make([]json.RawMessage, 0, len(reportItems))
+	for _, rawReportItem := range reportItems {
+		var reportItem types.ReportItem
+		if err := json.Unmarshal(rawReportItem, &reportItem); err != nil {
+			// a rule hit that cannot be identified cannot be matched against
+			// the disabled rules either, so it is kept as it is
+			logReportFilteringError(err)
+			enabledReportItems = append(enabledReportItems, rawReportItem)
+			continue
+		}
+		if d.isRuleDisabled(cluster, moduleToRuleName(reportItem.Module), reportItem.ErrorKey) {
+			continue
+		}
+		enabledReportItems = append(enabledReportItems, rawReportItem)
+	}
+
+	if len(enabledReportItems) == len(reportItems) {
+		// no rule of this report is disabled, store the original report
+		return report
+	}
+
+	filteredReportItems, err := json.Marshal(enabledReportItems)
+	if err != nil {
+		logReportFilteringError(err)
+		return report
+	}
+	document[reportsJSONField] = filteredReportItems
+
+	filteredReport, err := json.Marshal(document)
+	if err != nil {
+		logReportFilteringError(err)
+		return report
+	}
+
+	log.Debug().
+		Str(clusterAttribute, string(cluster.ClusterName)).
+		Int("omitted rules", len(reportItems)-len(enabledReportItems)).
+		Msg(disabledRulesOmittedMessage)
+
+	return types.ClusterReport(filteredReport)
+}
+
 func (d *Differ) getReportsWithIssuesToNotify(reports types.ReportContent, cluster types.ClusterEntry, ruleContent types.RulesMap) (reportsWithIssues types.ReportContent) {
 	reportsWithIssues = make(types.ReportContent, 0, len(reports))
 
@@ -524,6 +622,11 @@ func (d *Differ) ProduceEntriesToServiceLog(configuration *conf.ConfigStruct, cl
 func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent types.RulesMap,
 	reportItems types.ReportContent, report types.ClusterReport) (int, error) {
 
+	// Whatever the outcome of this cluster is, the report written to the
+	// `reported` table must not contain the rules the customer has disabled:
+	// it is the baseline ShouldNotify compares against on the next runs.
+	storedReport := d.filterDisabledRulesFromReport(cluster, report)
+
 	notificationMsg := generateInstantNotificationMessage(
 		&notificationEventURLs.ClusterDetails,
 		fmt.Sprint(cluster.AccountNumber),
@@ -585,7 +688,7 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 	}
 
 	if len(notificationMsg.Events) == 0 {
-		updateNotificationRecordSameState(d.Storage, cluster, report, notifiedAt, types.NotificationBackendTarget)
+		updateNotificationRecordSameState(d.Storage, cluster, storedReport, notifiedAt, types.NotificationBackendTarget)
 		return 0, nil
 	}
 
@@ -604,14 +707,14 @@ func (d *Differ) produceEntriesToKafka(cluster types.ClusterEntry, ruleContent t
 		log.Error().
 			Str(errorStr, err.Error()).
 			Msg("Couldn't send notification message to kafka topic.")
-		updateNotificationRecordErrorState(d.Storage, err, cluster, report, notifiedAt, types.NotificationBackendTarget)
+		updateNotificationRecordErrorState(d.Storage, err, cluster, storedReport, notifiedAt, types.NotificationBackendTarget)
 		return -1, err
 	}
 
 	if offset != -1 {
 		// update the database if any message is sent (not a DisabledProducer)
 		log.Debug().Msg("notifier is not disabled so DB is updated")
-		updateNotificationRecordSentState(d.Storage, cluster, report, notifiedAt, types.NotificationBackendTarget)
+		updateNotificationRecordSentState(d.Storage, cluster, storedReport, notifiedAt, types.NotificationBackendTarget)
 		return len(notificationMsg.Events), nil
 	}
 	return 0, nil
@@ -712,8 +815,13 @@ func (d *Differ) processReportsByCluster(config *conf.ConfigStruct, ruleContent 
 			timer = TimeOperation("send_notification_servicelog")
 			newNotifiedIssues, err := d.ProduceEntriesToServiceLog(config, cluster, rules, ruleContent, deserialized.Reports)
 			timer()
+			// The rules the customer has disabled are omitted from the report
+			// written to the `reported` table. ProduceEntriesToServiceLog
+			// neither receives nor returns the report, so unlike in the Kafka
+			// path the filtering has to be done here, by the shared loop.
+			storedReport := d.filterDisabledRulesFromReport(cluster, report)
 			timer = TimeOperation("update_notification_record_state_servicelog")
-			updateNotificationRecordState(d.Storage, cluster, report, newNotifiedIssues, notifiedAt, types.ServiceLogTarget, err)
+			updateNotificationRecordState(d.Storage, cluster, storedReport, newNotifiedIssues, notifiedAt, types.ServiceLogTarget, err)
 			timer()
 			notifiedIssues += newNotifiedIssues
 		}
